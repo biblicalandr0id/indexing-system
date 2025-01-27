@@ -1,0 +1,108 @@
+name: Deploy Indexing System
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [created]
+
+env:
+  PYTHON_VERSION: '3.9'
+  POETRY_VERSION: '1.4.2'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis
+        ports:
+          - 6379:6379
+      zookeeper:
+        image: zookeeper
+        ports:
+          - 2181:2181
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install Poetry
+      run: |
+        curl -sSL https://install.python-poetry.org | python - --version ${{ env.POETRY_VERSION }}
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: Cache Poetry dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pypoetry
+        key: ${{ runner.os }}-poetry-${{ hashFiles('poetry.lock') }}
+
+    - name: Install dependencies
+      run: |
+        poetry install
+
+    - name: Run linting
+      run: |
+        poetry run flake8 .
+        poetry run black . --check
+        poetry run mypy .
+
+    - name: Run tests with coverage
+      run: |
+        poetry run pytest --cov=./ --cov-report=xml
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        fail_ci_if_error: true
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install Poetry
+      run: |
+        curl -sSL https://install.python-poetry.org | python - --version ${{ env.POETRY_VERSION }}
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: Build package
+      run: poetry build
+
+    - name: Publish to PyPI
+      if: github.event_name == 'release'
+      run: |
+        poetry config pypi-token.pypi ${{ secrets.PYPI_TOKEN }}
+        poetry publish
+
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v2
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        push: true
+        tags: |
+          ghcr.io/biblicalandr0id/indexing-system:latest
+          ghcr.io/biblicalandr0id/indexing-system:${{ github.event.release.tag_name }}
